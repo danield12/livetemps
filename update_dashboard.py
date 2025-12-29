@@ -130,11 +130,11 @@ def update_cycle():
 
     # Generate Graph
     df = pd.read_csv(HISTORY_CSV)
-    if len(df) > 1440: df = df.tail(1440) # Keep 24 hours (1440 mins)
+    if len(df) > 1440: df = df.tail(1440) # Keep 24 hours
 
     fig = go.Figure()
     
-    # CI Lines (Dashed Cyan)
+    # CI Lines
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_upper'], mode='lines', line=dict(color='cyan', width=1, dash='dash'), name='95% CI High'))
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_lower'], mode='lines', line=dict(color='cyan', width=1, dash='dash'), name='95% CI Low'))
 
@@ -159,7 +159,27 @@ def update_cycle():
         hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
     )
 
+    # 1. Write the standard Plotly file
     fig.write_html(HTML_OUTPUT)
+
+    # ---------------------------------------------------------
+    # 2. INJECT AUTO-REFRESH TAG
+    # This reads the file back, adds a meta refresh tag to the <head>, and resaves it.
+    # ---------------------------------------------------------
+    try:
+        with open(HTML_OUTPUT, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        # Inject the meta refresh tag (refresh every 60 seconds)
+        # We replace the opening <head> tag with <head> + the meta tag
+        refresh_tag = f'<head><meta http-equiv="refresh" content="{UPDATE_INTERVAL}">'
+        updated_content = html_content.replace('<head>', refresh_tag)
+        
+        with open(HTML_OUTPUT, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+    except Exception as e:
+        print(f"Error injecting refresh tag: {e}")
+    # ---------------------------------------------------------
     
     # Git Push
     try:
