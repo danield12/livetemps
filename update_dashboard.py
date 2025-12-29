@@ -4,16 +4,36 @@ import pickle
 import os
 import requests
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, time as dtime
+import time
 import pytz
 import plotly.graph_objects as go
+import subprocess
+import warnings
+
+warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
 WUNDERGROUND_API_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'
 ENSEMBLE_FILE = "KLAX_Top3_Ensemble.pkl"
 HISTORY_CSV = "klax_live_history.csv"
 HTML_OUTPUT = "index.html"
+UPDATE_INTERVAL = 60  # Run every 60 seconds
 
+# --- 1. FETCH NWS OFFICIAL DATA ---
+def get_nws_temp():
+    try:
+        url = "https://api.weather.gov/stations/KLAX/observations/latest"
+        headers = {'User-Agent': '(my-weather-app, contact@example.com)'}
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            temp_c = r.json()['properties']['temperature']['value']
+            if temp_c is not None:
+                return (temp_c * 9/5) + 32
+    except: pass
+    return None
+
+# --- 2. RUN AI MODEL ---
 def get_live_prediction():
     if not os.path.exists(ENSEMBLE_FILE):
         print("❌ Error: Ensemble file not found.")
@@ -31,7 +51,7 @@ def get_live_prediction():
     def fetch_pws(sid):
         url = f"https://api.weather.com/v2/pws/observations/current?stationId={sid}&format=json&units=e&apiKey={WUNDERGROUND_API_KEY}"
         try:
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, timeout=4)
             if r.status_code == 200:
                 val = r.json()['observations'][0]['imperial']['temp']
                 return sid, val
@@ -48,7 +68,10 @@ def get_live_prediction():
 
     if not pws_vals: return None
 
-    live_mean = np.mean(list(pws_vals.values()))
+    live_vals = list(pws_vals.values())
+    live_mean = np.mean(live_vals)
+    live_median = np.median(live_vals)
+
     predictions = []
     rmse_values = []
     weights = []
@@ -78,68 +101,92 @@ def get_live_prediction():
     total_std_dev = np.sqrt(avg_variance + disagreement_variance)
     margin_of_error = 1.96 * total_std_dev
 
+    nws_val = get_nws_temp()
+
     return {
         'timestamp': datetime.now(pytz.timezone('US/Pacific')).strftime('%Y-%m-%d %H:%M:%S'),
         'prediction': round(weighted_mean, 2),
         'ci_lower': round(weighted_mean - margin_of_error, 2),
         'ci_upper': round(weighted_mean + margin_of_error, 2),
-        'raw_mean': round(live_mean, 2)
+        'raw_mean': round(live_mean, 2),
+        'raw_median': round(live_median, 2),
+        'nws_temp': round(nws_val, 2) if nws_val else ""
     }
 
-def update_files():
+# --- 3. UPDATE GRAPH & GIT ---
+def update_cycle():
     data = get_live_prediction()
     if not data:
-        print("No data received.")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] No data received.")
         return
 
-    # 1. Update CSV
+    # Update CSV
     if not os.path.exists(HISTORY_CSV):
         with open(HISTORY_CSV, 'w') as f:
-            f.write("timestamp,prediction,ci_lower,ci_upper,raw_mean\n")
+            f.write("timestamp,prediction,ci_lower,ci_upper,raw_mean,raw_median,nws_temp\n")
     
     with open(HISTORY_CSV, 'a') as f:
-        f.write(f"{data['timestamp']},{data['prediction']},{data['ci_lower']},{data['ci_upper']},{data['raw_mean']}\n")
+        f.write(f"{data['timestamp']},{data['prediction']},{data['ci_lower']},{data['ci_upper']},{data['raw_mean']},{data['raw_median']},{data['nws_temp']}\n")
 
-    # 2. Update HTML Graph
+    # Generate Graph
     df = pd.read_csv(HISTORY_CSV)
-    
-    # Keep only last 24 hours of data (approx 288 records) to keep page load fast
-    if len(df) > 288:
-        df = df.tail(288)
+    if len(df) > 1440: df = df.tail(1440) # Keep 24 hours (1440 mins)
 
     fig = go.Figure()
     
-    # CI Band
-    fig.add_trace(go.Scatter(
-        x=df['timestamp'].tolist() + df['timestamp'].tolist()[::-1],
-        y=df['ci_upper'].tolist() + df['ci_lower'].tolist()[::-1],
-        fill='toself', fillcolor='rgba(0,176,246,0.2)',
-        line=dict(color='rgba(255,255,255,0)'),
-        hoverinfo="skip", name='95% Conf. Interval'
-    ))
+    # CI Lines (Dashed Cyan)
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_upper'], mode='lines', line=dict(color='cyan', width=1, dash='dash'), name='95% CI High'))
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_lower'], mode='lines', line=dict(color='cyan', width=1, dash='dash'), name='95% CI Low'))
 
-    # Prediction Line
-    fig.add_trace(go.Scatter(
-        x=df['timestamp'], y=df['prediction'],
-        mode='lines+markers', line=dict(color='#00b0f6', width=3),
-        marker=dict(size=6), name='AI Prediction'
-    ))
+    # Raw Stats
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['raw_mean'], mode='lines', line=dict(color='gray', width=1, dash='dot'), name='Station Mean'))
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['raw_median'], mode='lines', line=dict(color='yellow', width=1), name='Station Median'))
 
-    # Raw Mean Line
-    fig.add_trace(go.Scatter(
-        x=df['timestamp'], y=df['raw_mean'],
-        mode='lines', line=dict(color='gray', width=1, dash='dot'),
-        name='Raw Station Mean'
-    ))
+    # NWS Official
+    df_nws = df[df['nws_temp'].notna()]
+    if not df_nws.empty:
+        fig.add_trace(go.Scatter(x=df_nws['timestamp'], y=df_nws['nws_temp'], mode='lines+markers', line=dict(color='#ff4d4d', width=2), marker=dict(size=4), name='NWS Official'))
 
+    # AI Prediction
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['prediction'], mode='lines+markers', line=dict(color='#00b0f6', width=4), marker=dict(size=6), name='AI Prediction'))
+
+    current_pred = data['prediction']
+    current_nws = data['nws_temp'] if data['nws_temp'] != "" else "N/A"
+    
     fig.update_layout(
-        title=f"KLAX Live Temp (Last 24h)<br><sup>Current: {data['prediction']}°F</sup>",
+        title=f"KLAX Live Temp<br><sup>AI: {current_pred}°F | NWS: {current_nws}°F</sup>",
         template="plotly_dark", xaxis_title="Time (Pacific)", yaxis_title="Temp (°F)",
-        hovermode="x unified", legend=dict(orientation="h", y=1.02, x=1)
+        hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
     )
 
     fig.write_html(HTML_OUTPUT)
-    print(f"Updated {HTML_OUTPUT}")
+    
+    # Git Push
+    try:
+        subprocess.run(["git", "add", HISTORY_CSV, HTML_OUTPUT], check=True)
+        subprocess.run(["git", "commit", "-m", f"Update {datetime.now().strftime('%H:%M')}"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Updated & Pushed.")
+    except:
+        print("Git push failed (connection error?)")
 
+# --- MAIN LOOP ---
 if __name__ == "__main__":
-    update_files()
+    print("--- STARTING CONTINUOUS MONITOR ---")
+    
+    while True:
+        # 1. Run the Update
+        try:
+            update_cycle()
+        except Exception as e:
+            print(f"Cycle Error: {e}")
+
+        # 2. Check for Daily Exit (e.g., 23:58 PM)
+        # This allows Cron to restart it fresh at 00:00 or 06:00
+        now = datetime.now().time()
+        if now.hour == 23 and now.minute >= 58:
+            print("🕒 End of day reached. Exiting for scheduled restart.")
+            break
+        
+        # 3. Sleep
+        time.sleep(UPDATE_INTERVAL)
