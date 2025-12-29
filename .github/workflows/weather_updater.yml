@@ -1,0 +1,37 @@
+name: Update Weather Dashboard
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # Runs every 10 minutes (approx)
+  workflow_dispatch:        # Allows manual run via button
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Update Script
+        run: python update_dashboard.py
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "WeatherBot"
+          git config --global user.email "bot@example.com"
+          git add klax_live_history.csv index.html
+          git commit -m "Auto-update weather data" || echo "No changes to commit"
+          git push
