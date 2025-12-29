@@ -2,8 +2,8 @@ name: Update Weather Dashboard
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # Runs every 10 minutes (approx)
-  workflow_dispatch:        # Allows manual run via button
+    - cron: '*/5 * * * *'   # Runs every 5 minutes (Fastest allowed by GitHub)
+  workflow_dispatch:        # Allows you to click "Run workflow" manually
 
 permissions:
   contents: write
@@ -33,5 +33,7 @@ jobs:
           git config --global user.name "WeatherBot"
           git config --global user.email "bot@example.com"
           git add klax_live_history.csv index.html
+          # Pull latest changes to avoid conflicts
+          git pull --rebase
           git commit -m "Auto-update weather data" || echo "No changes to commit"
           git push
