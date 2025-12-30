@@ -2,9 +2,10 @@ name: Update Weather Dashboard
 
 on:
   schedule:
-    # 13:00 UTC = 05:00 AM Pacific Standard Time (PST)
-    - cron: '0 13 * * *'
-  workflow_dispatch:        # Allows manual run via button
+    # Runs every hour at the top of the hour. 
+    # Change back to '0 13 * * *' if you only want it once a day at 5AM PST.
+    - cron: '0 * * * *' 
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,6 +17,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Fetches all history so rebase works better
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -24,17 +27,24 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install pandas numpy plotly requests pytz scikit-learn
 
       - name: Run Update Script
         run: python update_dashboard.py
 
       - name: Commit and Push
         run: |
-          git config --global user.name "WeatherBot"
-          git config --global user.email "bot@example.com"
+          # Use the official GitHub Actions Bot identity
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
           git add klax_live_history.csv index.html
-          # Pull latest changes to avoid conflicts
-          git pull --rebase
-          git commit -m "Daily 5AM update" || echo "No changes to commit"
-          git push
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Weather Update: $(date -u)"
+            git pull --rebase origin main
+            git push
+          fi
