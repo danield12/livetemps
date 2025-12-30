@@ -8,9 +8,9 @@ from datetime import datetime
 import pytz
 import plotly.graph_objects as go
 import warnings
+import time  # Added for the sleep loop
 
 # --- PATH CONFIGURATION ---
-# This ensures the script always acts on the folder it is located in
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
@@ -21,8 +21,9 @@ WUNDERGROUND_API_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'
 ENSEMBLE_FILE = os.path.join(BASE_DIR, "KLAX_Top3_Ensemble.pkl")
 HISTORY_CSV = os.path.join(BASE_DIR, "klax_live_history.csv")
 HTML_OUTPUT = os.path.join(BASE_DIR, "index.html")
-# Used for the meta-refresh tag in the HTML
-UPDATE_INTERVAL = 300 
+
+# UPDATED: Set to 60 seconds (1 minute) to match your loop
+UPDATE_INTERVAL = 60 
 
 def get_nws_temp():
     try:
@@ -90,7 +91,7 @@ def get_live_prediction():
     }
 
 def run_single_update():
-    print(f">> STARTING MANUAL UPDATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f">> STARTING UPDATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     data = get_live_prediction()
     if not data: return
 
@@ -138,14 +139,33 @@ def run_single_update():
     </html>
     """
 
-    # Write the HTML file to the correct path
     with open(HTML_OUTPUT, "w", encoding='utf-8') as f:
         f.write(html_content)
     
-    print(f"✓ {HTML_OUTPUT} successfully generated.")
+    print(f"✓ {HTML_OUTPUT} generated successfully.")
 
+# --- MAIN EXECUTION LOOP ---
 if __name__ == "__main__":
+    # Settings for the run
+    DURATION_HOURS = 6
+    REFRESH_SECONDS = 60
+    
+    start_time = time.time()
+    end_time = start_time + (DURATION_HOURS * 3600)
+    
+    print(f"--- Script will run for {DURATION_HOURS} hours (until approx {datetime.fromtimestamp(end_time).strftime('%H:%M:%S')}) ---")
+    
     try:
-        run_single_update()
+        while time.time() < end_time:
+            run_single_update()
+            
+            # Calculate remaining time to sleep
+            # (Simple sleep is usually fine, but this handles drift slightly better)
+            time.sleep(REFRESH_SECONDS)
+            
+    except KeyboardInterrupt:
+        print("\n>> Script stopped by user.")
     except Exception as e:
         print(f"CRITICAL ERROR: {e}")
+    
+    print("--- 6 Hour Run Complete ---")
