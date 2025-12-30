@@ -5,23 +5,24 @@ import os
 import requests
 import concurrent.futures
 from datetime import datetime
-import time
 import pytz
 import plotly.graph_objects as go
-import subprocess
 import warnings
 
-# Force the script to stay in its own directory
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+# --- PATH CONFIGURATION ---
+# This ensures the script always acts on the folder it is located in
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(BASE_DIR)
 
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
 WUNDERGROUND_API_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'
-ENSEMBLE_FILE = "KLAX_Top3_Ensemble.pkl"
-HISTORY_CSV = "klax_live_history.csv"
-HTML_OUTPUT = "index.html"
-UPDATE_INTERVAL = 300 # 5 Minutes is best for GitHub Pages
+ENSEMBLE_FILE = os.path.join(BASE_DIR, "KLAX_Top3_Ensemble.pkl")
+HISTORY_CSV = os.path.join(BASE_DIR, "klax_live_history.csv")
+HTML_OUTPUT = os.path.join(BASE_DIR, "index.html")
+# Used for the meta-refresh tag in the HTML
+UPDATE_INTERVAL = 300 
 
 def get_nws_temp():
     try:
@@ -36,7 +37,7 @@ def get_nws_temp():
 
 def get_live_prediction():
     if not os.path.exists(ENSEMBLE_FILE):
-        print("❌ Model file missing.")
+        print(f"❌ Model file missing at: {ENSEMBLE_FILE}")
         return None
 
     with open(ENSEMBLE_FILE, 'rb') as f:
@@ -59,7 +60,9 @@ def get_live_prediction():
         for res in results:
             if res: pws_vals[res[0]] = res[1]
 
-    if not pws_vals: return None
+    if not pws_vals: 
+        print("❌ No PWS data retrieved.")
+        return None
 
     live_mean = np.mean(list(pws_vals.values()))
     preds = []
@@ -86,8 +89,8 @@ def get_live_prediction():
         'nws_temp': round(nws, 2) if nws else ""
     }
 
-def update_cycle():
-    print(f"\n>> UPDATING: {datetime.now().strftime('%H:%M:%S')}")
+def run_single_update():
+    print(f">> STARTING MANUAL UPDATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     data = get_live_prediction()
     if not data: return
 
@@ -96,7 +99,7 @@ def update_cycle():
     df_new.to_csv(HISTORY_CSV, mode='a', header=not os.path.exists(HISTORY_CSV), index=False)
 
     # Load history for graph
-    df = pd.read_csv(HISTORY_CSV).tail(288) # Last 24 hours (if 5-min intervals)
+    df = pd.read_csv(HISTORY_CSV).tail(288) 
 
     # Plotly Graph
     fig = go.Figure()
@@ -104,7 +107,12 @@ def update_cycle():
     if 'nws_temp' in df:
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df['nws_temp'], name="NWS Official", line=dict(color='#ff4d4d', width=2)))
 
-    fig.update_layout(template="plotly_dark", height=600, margin=dict(l=10, r=10, t=50, b=10))
+    fig.update_layout(
+        template="plotly_dark", 
+        height=600, 
+        margin=dict(l=10, r=10, t=50, b=10),
+        title="KLAX Temperature: AI vs Official"
+    )
 
     # Generate the Full HTML String
     html_content = f"""
@@ -116,7 +124,7 @@ def update_cycle():
         <title>KLAX LIVE AI</title>
         <style>
             body {{ background-color: #111; color: white; font-family: sans-serif; margin: 0; text-align: center; }}
-            .status {{ background: #222; padding: 10px; border-bottom: 2px solid #00b0f6; font-size: 0.8em; }}
+            .status {{ background: #222; padding: 15px; border-bottom: 2px solid #00b0f6; font-size: 1em; font-weight: bold; }}
         </style>
     </head>
     <body>
@@ -130,25 +138,14 @@ def update_cycle():
     </html>
     """
 
-    # ATOMIC WRITE: Write to tmp, then rename
-    with open("tmp.html", "w", encoding='utf-8') as f:
+    # Write the HTML file to the correct path
+    with open(HTML_OUTPUT, "w", encoding='utf-8') as f:
         f.write(html_content)
-    os.replace("tmp.html", HTML_OUTPUT)
-    print(f"✓ {HTML_OUTPUT} Updated Locally.")
-
-    # Push to Git
-    try:
-        subprocess.run(["git", "add", HISTORY_CSV, HTML_OUTPUT], check=True)
-        subprocess.run(["git", "commit", "-m", f"Auto-update {data['timestamp']}"], check=True)
-        subprocess.run(["git", "push"], check=True)
-        print("✓ Pushed to GitHub.")
-    except Exception as e:
-        print(f"❌ Git Error: {e}")
+    
+    print(f"✓ {HTML_OUTPUT} successfully generated.")
 
 if __name__ == "__main__":
-    while True:
-        try:
-            update_cycle()
-        except Exception as e:
-            print(f"ERROR: {e}")
-        time.sleep(UPDATE_INTERVAL)
+    try:
+        run_single_update()
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
