@@ -4,7 +4,7 @@ import pickle
 import os
 import requests
 import concurrent.futures
-from datetime import datetime, time as dtime
+from datetime import datetime
 import time
 import pytz
 import plotly.graph_objects as go
@@ -18,7 +18,7 @@ WUNDERGROUND_API_KEY = 'e1f10a1e78da46f5b10a1e78da96f525'
 ENSEMBLE_FILE = "KLAX_Top3_Ensemble.pkl"
 HISTORY_CSV = "klax_live_history.csv"
 HTML_OUTPUT = "index.html"
-UPDATE_INTERVAL = 60  # Run every 60 seconds
+UPDATE_INTERVAL = 300  # Increased to 5 mins to allow GitHub Pages to build
 
 # --- 1. FETCH NWS OFFICIAL DATA ---
 def get_nws_temp():
@@ -30,13 +30,14 @@ def get_nws_temp():
             temp_c = r.json()['properties']['temperature']['value']
             if temp_c is not None:
                 return (temp_c * 9/5) + 32
-    except: pass
+    except Exception as e:
+        print(f"   [NWS Error]: {e}")
     return None
 
 # --- 2. RUN AI MODEL ---
 def get_live_prediction():
     if not os.path.exists(ENSEMBLE_FILE):
-        print("❌ Error: Ensemble file not found.")
+        print(f"❌ Error: {ENSEMBLE_FILE} not found in {os.getcwd()}")
         return None
 
     with open(ENSEMBLE_FILE, 'rb') as f:
@@ -51,12 +52,13 @@ def get_live_prediction():
     def fetch_pws(sid):
         url = f"https://api.weather.com/v2/pws/observations/current?stationId={sid}&format=json&units=e&apiKey={WUNDERGROUND_API_KEY}"
         try:
-            r = requests.get(url, timeout=4)
+            r = requests.get(url, timeout=5)
             if r.status_code == 200:
                 val = r.json()['observations'][0]['imperial']['temp']
                 return sid, val
         except: return None
 
+    print(f"-> Fetching data from {len(needed_list)} PWS stations...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(fetch_pws, sid) for sid in needed_list]
         for f in concurrent.futures.as_completed(futures):
@@ -66,7 +68,9 @@ def get_live_prediction():
                 if val is not None and -20 < val < 130:
                     pws_vals[sid] = val
 
-    if not pws_vals: return None
+    if not pws_vals:
+        print("❌ No PWS data retrieved.")
+        return None
 
     live_vals = list(pws_vals.values())
     live_mean = np.mean(live_vals)
@@ -113,100 +117,96 @@ def get_live_prediction():
         'nws_temp': round(nws_val, 2) if nws_val else ""
     }
 
-# --- 3. UPDATE GRAPH & GIT ---
+# --- 3. UPDATE CYCLE ---
 def update_cycle():
+    print(f"\n--- Cycle Start: {datetime.now().strftime('%H:%M:%S')} ---")
+    
+    # 1. Get Data
     data = get_live_prediction()
     if not data:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] No data received.")
         return
 
-    # Update CSV
+    # 2. Update CSV
     if not os.path.exists(HISTORY_CSV):
         with open(HISTORY_CSV, 'w') as f:
             f.write("timestamp,prediction,ci_lower,ci_upper,raw_mean,raw_median,nws_temp\n")
     
     with open(HISTORY_CSV, 'a') as f:
         f.write(f"{data['timestamp']},{data['prediction']},{data['ci_lower']},{data['ci_upper']},{data['raw_mean']},{data['raw_median']},{data['nws_temp']}\n")
+    print("✓ CSV Updated.")
 
-    # Generate Graph
+    # 3. Generate Graph
     df = pd.read_csv(HISTORY_CSV)
-    if len(df) > 1440: df = df.tail(1440) # Keep 24 hours
+    if len(df) > 1440: df = df.tail(1440) 
 
     fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_upper'], mode='lines', line=dict(color='rgba(0,255,255,0.2)', width=0), showlegend=False))
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_lower'], mode='lines', fill='tonexty', fillcolor='rgba(0,255,255,0.1)', line=dict(color='rgba(0,255,255,0.2)', width=0), name='95% Confidence'))
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['raw_mean'], mode='lines', line=dict(color='gray', width=1, dash='dot'), name='PWS Mean'))
     
-    # CI Lines
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_upper'], mode='lines', line=dict(color='cyan', width=1, dash='dash'), name='95% CI High'))
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['ci_lower'], mode='lines', line=dict(color='cyan', width=1, dash='dash'), name='95% CI Low'))
-
-    # Raw Stats
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['raw_mean'], mode='lines', line=dict(color='gray', width=1, dash='dot'), name='Station Mean'))
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['raw_median'], mode='lines', line=dict(color='yellow', width=1), name='Station Median'))
-
-    # NWS Official
     df_nws = df[df['nws_temp'].notna()]
     if not df_nws.empty:
-        fig.add_trace(go.Scatter(x=df_nws['timestamp'], y=df_nws['nws_temp'], mode='lines+markers', line=dict(color='#ff4d4d', width=2), marker=dict(size=4), name='NWS Official'))
+        fig.add_trace(go.Scatter(x=df_nws['timestamp'], y=df_nws['nws_temp'], mode='lines+markers', line=dict(color='#ff4d4d', width=2), name='NWS Official'))
 
-    # AI Prediction
-    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['prediction'], mode='lines+markers', line=dict(color='#00b0f6', width=4), marker=dict(size=6), name='AI Prediction'))
+    fig.add_trace(go.Scatter(x=df['timestamp'], y=df['prediction'], mode='lines+markers', line=dict(color='#00b0f6', width=4), name='AI Prediction'))
 
     current_pred = data['prediction']
     current_nws = data['nws_temp'] if data['nws_temp'] != "" else "N/A"
     
     fig.update_layout(
-        title=f"KLAX Live Temp<br><sup>AI: {current_pred}°F | NWS: {current_nws}°F</sup>",
+        title=f"KLAX Live Temp Prediction<br><sup>AI: {current_pred}°F | NWS: {current_nws}°F | Last Updated: {data['timestamp']}</sup>",
         template="plotly_dark", xaxis_title="Time (Pacific)", yaxis_title="Temp (°F)",
-        hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
+        hovermode="x unified", legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center")
     )
 
-    # 1. Write the standard Plotly file
-    fig.write_html(HTML_OUTPUT)
-
-    # ---------------------------------------------------------
-    # 2. INJECT AUTO-REFRESH TAG
-    # This reads the file back, adds a meta refresh tag to the <head>, and resaves it.
-    # ---------------------------------------------------------
-    try:
-        with open(HTML_OUTPUT, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        
-        # Inject the meta refresh tag (refresh every 60 seconds)
-        # We replace the opening <head> tag with <head> + the meta tag
-        refresh_tag = f'<head><meta http-equiv="refresh" content="{UPDATE_INTERVAL}">'
-        updated_content = html_content.replace('<head>', refresh_tag)
-        
-        with open(HTML_OUTPUT, 'w', encoding='utf-8') as f:
-            f.write(updated_content)
-    except Exception as e:
-        print(f"Error injecting refresh tag: {e}")
-    # ---------------------------------------------------------
+    # 4. Save HTML with Cache-Busting Meta Tags
+    html_body = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    full_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta http-equiv="refresh" content="{UPDATE_INTERVAL}">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
+        <title>KLAX AI Live Weather</title>
+        <style>body {{ background-color: #111; margin: 0; padding: 20px; font-family: sans-serif; color: white; }}</style>
+    </head>
+    <body>
+        {html_body}
+    </body>
+    </html>
+    """
     
-    # Git Push
+    with open(HTML_OUTPUT, 'w', encoding='utf-8') as f:
+        f.write(full_html)
+    print(f"✓ {HTML_OUTPUT} written to disk.")
+
+    # 5. Git Push
     try:
         subprocess.run(["git", "add", HISTORY_CSV, HTML_OUTPUT], check=True)
-        subprocess.run(["git", "commit", "-m", f"Update {datetime.now().strftime('%H:%M')}"], check=True)
+        subprocess.run(["git", "commit", "-m", f"Update {data['timestamp']}"], check=True)
         subprocess.run(["git", "push"], check=True)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Updated & Pushed.")
-    except:
-        print("Git push failed (connection error?)")
+        print("✓ Git Push Successful.")
+    except Exception as e:
+        print(f"⚠️ Git Push Failed: {e}")
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
     print("--- STARTING CONTINUOUS MONITOR ---")
+    print(f"Interval: {UPDATE_INTERVAL}s | Output: {HTML_OUTPUT}")
     
     while True:
-        # 1. Run the Update
         try:
             update_cycle()
         except Exception as e:
-            print(f"Cycle Error: {e}")
+            print(f"Critical Cycle Error: {e}")
 
-        # 2. Check for Daily Exit (e.g., 23:58 PM)
-        # This allows Cron to restart it fresh at 00:00 or 06:00
+        # Check for Daily Exit
         now = datetime.now().time()
-        if now.hour == 23 and now.minute >= 58:
-            print("🕒 End of day reached. Exiting for scheduled restart.")
+        if now.hour == 23 and now.minute >= 55:
+            print("🕒 Maintenance window reached. Exiting.")
             break
         
-        # 3. Sleep
+        print(f"Sleeping for {UPDATE_INTERVAL}s...")
         time.sleep(UPDATE_INTERVAL)
